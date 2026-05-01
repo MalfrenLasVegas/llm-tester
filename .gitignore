@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.env
+llm-tester-report.json
+llm-tester-report.md
+llm-tester-quick.json
+llm-tester-context.json
+llm-tester-context.md
+reports/
+dist/
+build/
+*.egg-info/

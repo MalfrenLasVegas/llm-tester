@@ -1,0 +1,1 @@
+"""Pruebas independientes de capacidades."""
