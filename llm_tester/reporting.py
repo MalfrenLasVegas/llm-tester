@@ -143,6 +143,12 @@ def build_recommendations(report: Report) -> list[str]:
             "Contexto: usa margen por debajo del máximo aproximado detectado; la prueba no sustituye "
             "la ventana oficial del proveedor."
         )
+    features = by_name.get("API feature detection")
+    if features and features.details.get("rejected_count"):
+        recs.append(
+            "API features: revisa accepted_features/rejected_features en el JSON; un 200 HTTP puede indicar "
+            "aceptacion del gateway, no necesariamente uso semantico del parametro."
+        )
     if not recs:
         recs.append("La API parece funcional para los tests ejecutados. Repite con --verbose si necesitas auditar payloads.")
     return recs
@@ -160,6 +166,9 @@ def _details_summary(result: TestResult, *, plain: bool = False) -> str:
         "chunks",
         "time_to_first_token_ms",
         "reasoning_effort_accepted",
+        "accepted_count",
+        "rejected_count",
+        "accepted_features",
         "appears_correct",
         "dimension",
         "max_passed_approx_tokens",

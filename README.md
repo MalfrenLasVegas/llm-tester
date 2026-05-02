@@ -14,6 +14,7 @@ It uses direct HTTP calls through `httpx`; the official OpenAI SDK is not requir
 - Safe API key handling with masked output
 - JSON report export
 - Optional Markdown report export
+- API feature detection for reasoning/thinking/generation parameters
 - No telemetry
 - No external calls except the endpoint you configure
 - Dockerfile included
@@ -31,6 +32,7 @@ It uses direct HTTP calls through `httpx`; the official OpenAI SDK is not requir
 | Structured outputs | Uses `response_format: {"type": "json_schema"}` and validates schema |
 | Vision | Sends text plus a generated PNG image as a data URL |
 | Reasoning | Tests common reasoning params without requesting private chain of thought |
+| API feature detection | Probes accepted/rejected generation, reasoning, and thinking parameters |
 | Context | Tries configurable approximate context sizes |
 | Embeddings | Calls `/v1/embeddings` when an embeddings model is provided or detected |
 | Compatibility | Heuristics for OpenAI, Ollama, llama.cpp, LM Studio, vLLM, OpenRouter, LiteLLM, Groq, Together, DeepInfra, and other compatible APIs |
@@ -141,6 +143,17 @@ llm-tester stress-context \
   --markdown
 ```
 
+API feature detection:
+
+```bash
+llm-tester detect-features \
+  --base-url https://endpoint.com/v1 \
+  --api-key sk-xxx \
+  --model model-name \
+  --output-token-caps 1024,4096,8192,16384 \
+  --markdown
+```
+
 Verbose diagnostics:
 
 ```bash
@@ -236,6 +249,7 @@ llm_tester/
     tools.py
     json_mode.py
     reasoning.py
+    api_features.py
     context.py
     embeddings.py
 ```

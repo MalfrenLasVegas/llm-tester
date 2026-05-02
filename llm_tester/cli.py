@@ -19,6 +19,7 @@ from .reporting import (
     save_json_report,
     save_markdown_report,
 )
+from .tests.api_features import run_api_feature_detection
 from .tests.chat import (
     available_models_from_result,
     run_basic_chat_test,
@@ -128,7 +129,48 @@ def _context_sizes(max_test: int, stress: bool = False) -> list[int]:
     base = [4_000, 8_000, 16_000, 32_000]
     if stress:
         base.extend([64_000, 128_000])
-    return [size for size in base if size <= max_test]
+    base.append(max_test)
+    return sorted({size for size in base if size <= max_test})
+
+
+def _parse_context_sizes(value: str | None) -> list[int] | None:
+    if not value:
+        return None
+    sizes: list[int] = []
+    for raw_item in value.replace(";", ",").split(","):
+        item = raw_item.strip()
+        if not item:
+            continue
+        try:
+            size = int(item.replace("_", ""))
+        except ValueError as exc:
+            raise typer.BadParameter(f"Tamaño de contexto no valido: {item!r}.") from exc
+        if size < 1000:
+            raise typer.BadParameter("Cada tamaño de contexto debe ser >= 1000 tokens aproximados.")
+        sizes.append(size)
+    if not sizes:
+        raise typer.BadParameter("Indica al menos un tamaño de contexto.")
+    return sorted(set(sizes))
+
+
+def _parse_output_token_caps(value: str | None) -> list[int] | None:
+    if not value:
+        return None
+    caps: list[int] = []
+    for raw_item in value.replace(";", ",").split(","):
+        item = raw_item.strip()
+        if not item:
+            continue
+        try:
+            cap = int(item.replace("_", ""))
+        except ValueError as exc:
+            raise typer.BadParameter(f"Limite de tokens de salida no valido: {item!r}.") from exc
+        if cap < 1:
+            raise typer.BadParameter("Cada limite de tokens de salida debe ser >= 1.")
+        caps.append(cap)
+    if not caps:
+        raise typer.BadParameter("Indica al menos un limite de tokens de salida.")
+    return sorted(set(caps))
 
 
 def _make_skipped(name: str, reason: str) -> TestResult:
@@ -159,6 +201,7 @@ def _run_suite(
     skip_embeddings: bool,
     skip_tools: bool,
     context_max_test: int,
+    context_sizes: list[int] | None = None,
     stress: bool = False,
     quick: bool = False,
     markdown: bool = False,
@@ -203,8 +246,15 @@ def _run_suite(
             if skip_context:
                 test_plan.append(lambda: _make_skipped("Contexto aproximado", "--skip-context activado."))
             else:
-                sizes = _context_sizes(context_max_test, stress=stress)
-                test_plan.append(lambda: run_context_test(client, selected_model, sizes))
+                sizes = context_sizes or _context_sizes(context_max_test, stress=stress)
+                test_plan.append(
+                    lambda: run_context_test(
+                        client,
+                        selected_model,
+                        sizes,
+                        progress=_print_context_progress,
+                    )
+                )
             if skip_embeddings:
                 test_plan.append(lambda: _make_skipped("Embeddings", "--skip-embeddings activado."))
             else:
@@ -259,6 +309,48 @@ def _print_progress(result: TestResult) -> None:
     console.print(f"[{style}]{result.status.upper()}[/] {result.name}: {supported}{latency}")
 
 
+def _print_context_progress(event: dict[str, object]) -> None:
+    kind = event.get("event")
+    size = event.get("size")
+    if kind == "start":
+        index = event.get("index")
+        total = event.get("total")
+        console.print(f"[cyan]CTX[/] probando ~{size} tokens ({index}/{total})...")
+        return
+    if kind == "pass":
+        latency = event.get("latency_ms")
+        latency_text = f" ({latency:.0f} ms)" if isinstance(latency, float) else ""
+        console.print(f"[green]OK[/] Contexto ~{size}: marca recuperada{latency_text}")
+        return
+    if kind == "fail":
+        error = str(event.get("error") or "fallo desconocido").replace("\n", " ")
+        if len(error) > 180:
+            error = error[:177] + "..."
+        latency = event.get("latency_ms")
+        latency_text = f" ({latency:.0f} ms)" if isinstance(latency, float) else ""
+        console.print(f"[red]FAIL[/] Contexto ~{size}{latency_text}: {error}")
+
+
+def _print_feature_progress(event: dict[str, object]) -> None:
+    kind = event.get("event")
+    probe = event.get("probe")
+    if kind == "start":
+        index = event.get("index")
+        total = event.get("total")
+        console.print(f"[cyan]API[/] probando {probe} ({index}/{total})...")
+        return
+    if kind == "accepted":
+        latency = event.get("latency_ms")
+        latency_text = f" ({latency:.0f} ms)" if isinstance(latency, float) else ""
+        console.print(f"[green]OK[/] {probe} aceptado{latency_text}")
+        return
+    if kind == "rejected":
+        error = str(event.get("error") or "rechazado").replace("\n", " ")
+        if len(error) > 180:
+            error = error[:177] + "..."
+        console.print(f"[yellow]NO[/] {probe}: {error}")
+
+
 @app.command()
 def run(
     base_url: BaseUrlOption = None,
@@ -274,6 +366,13 @@ def run(
         int,
         typer.Option("--context-max-test", min=1000, help="Máximo aproximado de tokens para contexto."),
     ] = 32_000,
+    context_sizes: Annotated[
+        str | None,
+        typer.Option(
+            "--context-sizes",
+            help="Lista exacta de tamaños aproximados a probar, por ejemplo 24000,28000,32000.",
+        ),
+    ] = None,
     markdown: Annotated[bool, typer.Option("--markdown", help="Guarda también informe Markdown.")] = False,
     json_output: Annotated[
         Path | None,
@@ -307,6 +406,7 @@ def run(
         skip_embeddings=skip_embeddings,
         skip_tools=skip_tools,
         context_max_test=context_max_test,
+        context_sizes=_parse_context_sizes(context_sizes),
         markdown=markdown,
         json_output=json_output,
         markdown_output=markdown_output,
@@ -380,6 +480,73 @@ def list_models(
     console.print(table)
 
 
+@app.command("detect-features")
+def detect_features(
+    base_url: BaseUrlOption = None,
+    api_key: ApiKeyOption = None,
+    model: ModelOption = None,
+    timeout: TimeoutOption = 90.0,
+    output_token_caps: Annotated[
+        str | None,
+        typer.Option(
+            "--output-token-caps",
+            help="Limites de salida a validar, por ejemplo 1024,4096,8192. Vacio para omitir.",
+        ),
+    ] = "1024,4096,8192,16384",
+    deep: Annotated[
+        bool,
+        typer.Option("--deep", help="Incluye probes potencialmente mas caros como thinking budget 1024."),
+    ] = False,
+    json_output: Annotated[
+        Path | None,
+        typer.Option("--json-output", help="Ruta del informe JSON."),
+    ] = Path("llm-tester-features.json"),
+    markdown: Annotated[bool, typer.Option("--markdown")] = False,
+    markdown_output: Annotated[
+        Path | None,
+        typer.Option("--markdown-output", help="Ruta del informe Markdown."),
+    ] = None,
+    non_interactive: Annotated[bool, typer.Option("--non-interactive")] = False,
+    verbose: VerboseOption = False,
+) -> None:
+    """Detecta parametros de API aceptados por el endpoint/modelo."""
+    load_dotenv()
+    interactive = not non_interactive
+    base = _resolve_base_url(base_url, interactive)
+    key = _resolve_api_key(api_key, interactive)
+    with LLMClient(base, key, timeout=timeout, verbose=verbose) as client:
+        connectivity = run_connectivity_test(client)
+        _print_progress(connectivity)
+        models = available_models_from_result(connectivity)
+        selected_model = _select_model(_resolve_model(model, interactive=False), models, interactive=interactive)
+        result = run_api_feature_detection(
+            client,
+            selected_model,
+            output_token_caps=_parse_output_token_caps(output_token_caps),
+            deep=deep,
+            progress=_print_feature_progress,
+        )
+        _print_progress(result)
+    report = Report(
+        endpoint=base,
+        tested_model=selected_model,
+        created_at=utc_now(),
+        compatibility_guess=detect_provider(base, model_ids=models, error_text=result.raw_error),
+        results=[connectivity, result],
+    )
+    report.errors = collect_errors(report.results)
+    report.recommendations = build_recommendations(report)
+    print_report(report, console)
+    saved_json = save_json_report(report, json_output or Path("llm-tester-features.json"))
+    console.print(f"[green]JSON guardado:[/] {saved_json}")
+    if markdown:
+        if markdown_output is None:
+            markdown_output = Path("llm-tester-features.md")
+        markdown_output = _safe_markdown_output_path(markdown_output)
+        saved_md = save_markdown_report(report, markdown_output)
+        console.print(f"[green]Markdown guardado:[/] {saved_md}")
+
+
 @app.command("stress-context")
 def stress_context(
     base_url: BaseUrlOption = None,
@@ -390,6 +557,13 @@ def stress_context(
         int,
         typer.Option("--max-test", min=1000, help="Máximo aproximado de tokens a probar."),
     ] = 32_768,
+    sizes: Annotated[
+        str | None,
+        typer.Option(
+            "--sizes",
+            help="Lista exacta de tamaños aproximados a probar, por ejemplo 32000,48000,64000.",
+        ),
+    ] = None,
     json_output: Annotated[
         Path | None,
         typer.Option("--json-output", help="Ruta del informe JSON."),
@@ -407,8 +581,13 @@ def stress_context(
         connectivity = run_connectivity_test(client)
         models = available_models_from_result(connectivity)
         selected_model = _select_model(_resolve_model(model, interactive=False), models, interactive=interactive)
-        sizes = _context_sizes(max_test, stress=True)
-        result = run_context_test(client, selected_model, sizes)
+        test_sizes = _parse_context_sizes(sizes) or _context_sizes(max_test, stress=True)
+        result = run_context_test(
+            client,
+            selected_model,
+            test_sizes,
+            progress=_print_context_progress,
+        )
     report = Report(
         endpoint=base,
         tested_model=selected_model,

@@ -10,6 +10,8 @@ llm-tester-report.md
 llm-tester-quick.json
 llm-tester-context.json
 llm-tester-context.md
+llm-tester-features.json
+llm-tester-features.md
 reports/
 dist/
 build/
