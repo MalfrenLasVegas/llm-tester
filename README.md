@@ -34,6 +34,7 @@ It uses direct HTTP calls through `httpx`; the official OpenAI SDK is not requir
 | Reasoning | Tests common reasoning params without requesting private chain of thought |
 | API feature detection | Probes accepted/rejected generation, reasoning, and thinking parameters |
 | Context | Tries configurable approximate context sizes |
+| Context quality | Measures effective long-context quality and degradation across sizes |
 | Embeddings | Calls `/v1/embeddings` when an embeddings model is provided or detected |
 | Compatibility | Heuristics for OpenAI, Ollama, llama.cpp, LM Studio, vLLM, OpenRouter, LiteLLM, Groq, Together, DeepInfra, and other compatible APIs |
 
@@ -142,6 +143,34 @@ llm-tester stress-context \
   --max-test 32768 \
   --markdown
 ```
+
+
+Context quality / degradation test:
+
+```bash
+llm-tester diagnose-context \
+  --base-url http://localhost:1234/v1 \
+  --model local-model \
+  --max-test 100000 \
+  --step 10000 \
+  --runs 3 \
+  --markdown
+```
+
+With exact sizes:
+
+```bash
+llm-tester diagnose-context \
+  --base-url http://localhost:1234/v1 \
+  --model local-model \
+  --sizes 8000,16000,24000,32000,48000,64000,80000,100000 \
+  --runs 3 \
+  --markdown
+```
+
+This diagnostic measures the **effective quality** of long context, not just whether an endpoint accepts a large prompt. For each size it runs needle retrieval at multiple positions, early instruction retention, separated multi-hop arithmetic, and strict JSON formatting. The report highlights where scores start to fall so you can estimate a real useful context window; for example, a model may accept 100K tokens while the score starts dropping from 40K.
+
+It cannot confirm KV cache quantization (Q2/Q4/Q8/FP16) from an OpenAI-compatible API. Results only show symptoms compatible with attention degradation, silent truncation/sliding window behavior, bad RoPE/context scaling, aggressive backend configuration, or a useful context smaller than the accepted context. This command can be expensive on paid models, especially with high `--max-test` and multiple `--runs`.
 
 API feature detection:
 
