@@ -2,7 +2,7 @@
 
 CLI tool for testing LLM models and OpenAI-compatible API endpoints.
 
-`llm-tester` lets you provide a base URL, API key, and model name, then runs an automated capability suite covering chat, streaming, system prompts, tool calling, JSON mode, structured outputs, vision, reasoning parameters, approximate context limits, embeddings, and provider compatibility hints.
+`llm-tester` lets you provide a base URL, API key, and model name, then runs an automated capability suite covering chat, streaming, system prompts, tool calling, JSON mode, structured outputs, vision, reasoning parameters, approximate context limits, long-context quality degradation, embeddings, and provider compatibility hints.
 
 It uses direct HTTP calls through `httpx`; the official OpenAI SDK is not required.
 
@@ -15,6 +15,7 @@ It uses direct HTTP calls through `httpx`; the official OpenAI SDK is not requir
 - JSON report export
 - Optional Markdown report export
 - API feature detection for reasoning/thinking/generation parameters
+- Long-context quality/degradation diagnosis with per-size scoring
 - No telemetry
 - No external calls except the endpoint you configure
 - Dockerfile included
@@ -170,6 +171,30 @@ llm-tester diagnose-context \
 
 This diagnostic measures the **effective quality** of long context, not just whether an endpoint accepts a large prompt. For each size it runs needle retrieval at multiple positions, early instruction retention, separated multi-hop arithmetic, and strict JSON formatting. The report highlights where scores start to fall so you can estimate a real useful context window; for example, a model may accept 100K tokens while the score starts dropping from 40K.
 
+What it measures per size and run:
+
+- **Needle retrieval by position**: recovers deterministic keys around 5%, 25%, 50%, 75%, and 95% of the prompt. This helps spot models that mostly remember recent tokens.
+- **Instruction retention**: places a critical rule near the beginning and asks for it at the end.
+- **Multi-hop reasoning across context**: separates `BASE_VALUE`, `MULTIPLIER`, and `OFFSET` across the prompt and checks the final calculation.
+- **JSON / format following**: requires pure JSON and scores whether the response can be parsed robustly.
+
+Scores are weighted as follows: retrieval `50%`, instruction retention `25%`, reasoning `20%`, and JSON parsing `5%`. Per-size classifications are:
+
+| Classification | Meaning |
+|---|---|
+| `ok` | Average total score is `>= 0.90` |
+| `warning` | Average total score is `>= 0.70` and `< 0.90` |
+| `degraded` | Average total score is `>= 0.40` and `< 0.70` |
+| `failed` | Average total score is `< 0.40` |
+
+The JSON/Markdown reports include `useful_context_estimate` (largest tested size with score `>= 0.90`), `max_usable_size` (largest tested size with score `>= 0.70`), `max_tested_size`, per-position scores, per-run expected/actual values, latency averages, failures, and symptom hypotheses such as `progressive_attention_degradation`, `possible_sliding_window_or_early_context_loss`, or `format_following_degrades_with_long_context`.
+
+Example conclusion you can derive from the report:
+
+```text
+This model accepts or processes ~100K tokens in the test, but its useful context appears closer to ~30K-40K because total score drops below 0.90 after that range.
+```
+
 It cannot confirm KV cache quantization (Q2/Q4/Q8/FP16) from an OpenAI-compatible API. Results only show symptoms compatible with attention degradation, silent truncation/sliding window behavior, bad RoPE/context scaling, aggressive backend configuration, or a useful context smaller than the accepted context. This command can be expensive on paid models, especially with high `--max-test` and multiple `--runs`.
 
 API feature detection:
@@ -253,7 +278,7 @@ Each test returns:
 
 ## Cost Notes
 
-Some tests consume tokens. Context tests can be expensive. By default, context testing is conservative, and larger context tests require explicit `stress-context` usage.
+Some tests consume tokens. Context tests can be expensive. By default, context testing is conservative, and larger context tests require explicit `stress-context` or `diagnose-context` usage. `diagnose-context --max-test 100000 --runs 3` sends multiple very large prompts and should be used carefully on paid APIs.
 
 Recommended low-cost first run:
 
@@ -280,6 +305,7 @@ llm_tester/
     reasoning.py
     api_features.py
     context.py
+    context_quality.py
     embeddings.py
 ```
 
