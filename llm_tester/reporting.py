@@ -114,6 +114,10 @@ def save_markdown_report(report: Report, path: str | Path) -> Path:
             )
             + " |"
         )
+    for result in report.results:
+        if result.name == "Calidad de contexto largo":
+            lines.extend(_context_quality_markdown(result))
+
     lines.extend(["", "## Errores detectados", ""])
     if report.errors:
         lines.extend(f"- `{_escape_md(error)}`" for error in report.errors)
@@ -128,6 +132,55 @@ def save_markdown_report(report: Report, path: str | Path) -> Path:
     return output
 
 
+def _context_quality_markdown(result: TestResult) -> list[str]:
+    details = result.details
+    lines = [
+        "",
+        "## Context quality / degradation test",
+        "",
+        details.get("disclaimer", ""),
+        "",
+        f"- Useful context estimate: `{details.get('useful_context_estimate') or '-'}`",
+        f"- Max usable size: `{details.get('max_usable_size') or '-'}`",
+        f"- Max tested size: `{details.get('max_tested_size') or '-'}`",
+        "",
+        "| Tamaño aprox. | Clasificación | Total | Retrieval | Instruction | Reasoning | JSON parse | Latencia media |",
+        "|---:|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for item in details.get("sizes", []):
+        latency = item.get("avg_latency_ms")
+        latency_text = f"{latency:.0f} ms" if isinstance(latency, int | float) else "-"
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(item.get("size", "-")),
+                    _escape_md(str(item.get("classification", "-"))),
+                    _format_score(item.get("avg_total_score")),
+                    _format_score(item.get("avg_retrieval_score")),
+                    _format_score(item.get("avg_instruction_score")),
+                    _format_score(item.get("avg_reasoning_score")),
+                    _format_score(item.get("avg_json_parse_score")),
+                    latency_text,
+                ]
+            )
+            + " |"
+        )
+    hypotheses = details.get("hypotheses") or []
+    lines.extend(["", "### Hipótesis", ""])
+    if hypotheses:
+        lines.extend(f"- `{_escape_md(str(item))}`" for item in hypotheses)
+    else:
+        lines.append("- Sin hipótesis destacadas.")
+    return lines
+
+
+def _format_score(value: Any) -> str:
+    if isinstance(value, int | float):
+        return f"{value:.2f}"
+    return "-"
+
+
 def build_recommendations(report: Report) -> list[str]:
     recs: list[str] = []
     by_name = {r.name: r for r in report.results}
@@ -137,6 +190,18 @@ def build_recommendations(report: Report) -> list[str]:
         result = by_name.get(name)
         if result and result.supported is False:
             recs.append(f"{name}: no lo declares como capacidad estable para este endpoint/modelo.")
+    context_quality = by_name.get("Calidad de contexto largo")
+    if context_quality:
+        useful = context_quality.details.get("useful_context_estimate")
+        usable = context_quality.details.get("max_usable_size")
+        tested = context_quality.details.get("max_tested_size")
+        if usable and tested and usable < tested:
+            recs.append(
+                f"Calidad de contexto: el modelo acepta/procesa hasta ~{tested} tokens en esta prueba, "
+                f"pero el contexto usable estimado cae hacia ~{usable}; revisa details.sizes e hipótesis."
+            )
+        elif useful:
+            recs.append(f"Calidad de contexto: no se detectó degradación significativa hasta ~{useful} tokens útiles.")
     context = by_name.get("Contexto aproximado")
     if context and context.details.get("max_passed_approx_tokens"):
         recs.append(
@@ -173,6 +238,10 @@ def _details_summary(result: TestResult, *, plain: bool = False) -> str:
         "dimension",
         "max_passed_approx_tokens",
         "classification",
+        "useful_context_estimate",
+        "max_usable_size",
+        "max_tested_size",
+        "hypotheses",
         "reason",
     ]
     parts: list[str] = []
