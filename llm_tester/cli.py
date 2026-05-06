@@ -27,6 +27,7 @@ from .tests.chat import (
     summarize_error_for_detection,
 )
 from .tests.context import run_context_test
+from .tests.context_quality import run_context_quality_test
 from .tests.embeddings import run_embeddings_test
 from .tests.json_mode import run_json_mode_test, run_structured_outputs_test
 from .tests.reasoning import run_reasoning_test, run_system_prompt_test
@@ -134,8 +135,10 @@ def _context_sizes(max_test: int, stress: bool = False) -> list[int]:
 
 
 def _parse_context_sizes(value: str | None) -> list[int] | None:
-    if not value:
+    if value is None:
         return None
+    if not value.strip():
+        raise typer.BadParameter("Indica al menos un tamaño de contexto.")
     sizes: list[int] = []
     for raw_item in value.replace(";", ",").split(","):
         item = raw_item.strip()
@@ -151,6 +154,14 @@ def _parse_context_sizes(value: str | None) -> list[int] | None:
     if not sizes:
         raise typer.BadParameter("Indica al menos un tamaño de contexto.")
     return sorted(set(sizes))
+
+
+def _quality_sizes(max_test: int, step: int) -> list[int]:
+    if max_test < 1000:
+        raise typer.BadParameter("--max-test debe ser >= 1000.")
+    if step < 1000:
+        raise typer.BadParameter("--step debe ser >= 1000.")
+    return list(range(10_000, max_test + 1, step)) or [max_test]
 
 
 def _parse_output_token_caps(value: str | None) -> list[int] | None:
@@ -329,6 +340,35 @@ def _print_context_progress(event: dict[str, object]) -> None:
         latency = event.get("latency_ms")
         latency_text = f" ({latency:.0f} ms)" if isinstance(latency, float) else ""
         console.print(f"[red]FAIL[/] Contexto ~{size}{latency_text}: {error}")
+
+
+def _print_context_quality_progress(event: dict[str, object]) -> None:
+    kind = event.get("event")
+    size = event.get("size")
+    if kind == "start":
+        run = event.get("run")
+        runs = event.get("runs")
+        console.print(f"[cyan]CTXQ[/] probando ~{size} tokens run {run}/{runs}...")
+        return
+    if kind == "size_complete":
+        score = float(event.get("avg_total_score") or 0.0)
+        retrieval = float(event.get("avg_retrieval_score") or 0.0)
+        instruction = float(event.get("avg_instruction_score") or 0.0)
+        reasoning = float(event.get("avg_reasoning_score") or 0.0)
+        json_parse = float(event.get("avg_json_parse_score") or 0.0)
+        classification = str(event.get("classification") or "failed")
+        label_style = {
+            "ok": ("OK", "green"),
+            "warning": ("WARN", "yellow"),
+            "degraded": ("DEGRADED", "magenta"),
+            "failed": ("FAIL", "red"),
+        }.get(classification, (classification.upper(), "red"))
+        label, style = label_style
+        console.print(
+            f"[{style}]{label}[/] Context quality ~{size}: "
+            f"total={score:.2f} retrieval={retrieval:.2f} instruction={instruction:.2f} "
+            f"reasoning={reasoning:.2f} json={json_parse:.2f}"
+        )
 
 
 def _print_feature_progress(event: dict[str, object]) -> None:
@@ -544,6 +584,87 @@ def detect_features(
             markdown_output = Path("llm-tester-features.md")
         markdown_output = _safe_markdown_output_path(markdown_output)
         saved_md = save_markdown_report(report, markdown_output)
+        console.print(f"[green]Markdown guardado:[/] {saved_md}")
+
+
+@app.command("diagnose-context")
+def diagnose_context(
+    base_url: BaseUrlOption = None,
+    api_key: ApiKeyOption = None,
+    model: ModelOption = None,
+    timeout: Annotated[
+        float,
+        typer.Option("--timeout", min=1.0, help="Timeout por petición en segundos."),
+    ] = 180.0,
+    sizes: Annotated[
+        str | None,
+        typer.Option(
+            "--sizes",
+            help="Lista exacta de tamaños aproximados a probar, por ejemplo 8000,16000,32000.",
+        ),
+    ] = None,
+    max_test: Annotated[
+        int,
+        typer.Option("--max-test", min=1000, help="Máximo aproximado de tokens a probar."),
+    ] = 100_000,
+    step: Annotated[
+        int,
+        typer.Option("--step", min=1000, help="Incremento aproximado de tokens cuando no se usa --sizes."),
+    ] = 10_000,
+    runs: Annotated[
+        int,
+        typer.Option("--runs", min=1, help="Repeticiones por tamaño."),
+    ] = 3,
+    json_output: Annotated[
+        Path,
+        typer.Option("--json-output", help="Ruta del informe JSON."),
+    ] = Path("llm-tester-context-quality.json"),
+    markdown: Annotated[bool, typer.Option("--markdown", help="Guarda también informe Markdown.")] = False,
+    markdown_output: Annotated[
+        Path,
+        typer.Option("--markdown-output", help="Ruta del informe Markdown."),
+    ] = Path("llm-tester-context-quality.md"),
+    non_interactive: Annotated[bool, typer.Option("--non-interactive")] = False,
+    verbose: VerboseOption = False,
+) -> None:
+    """Mide calidad y degradación efectiva del contexto largo. Puede ser caro en APIs de pago."""
+    load_dotenv()
+    interactive = not non_interactive
+    base = _resolve_base_url(base_url, interactive)
+    key = _resolve_api_key(api_key, interactive)
+    requested_model = _resolve_model(model, interactive=False)
+    test_sizes = _parse_context_sizes(sizes) or _quality_sizes(max_test, step)
+    console.print(
+        f"[bold]Endpoint:[/] {base}  [bold]API key:[/] {mask_api_key(key)}  "
+        f"[bold]Timeout:[/] {timeout:.0f}s  [bold]Runs:[/] {runs}"
+    )
+    with LLMClient(base, key, timeout=timeout, verbose=verbose) as client:
+        connectivity = run_connectivity_test(client)
+        _print_progress(connectivity)
+        models = available_models_from_result(connectivity)
+        selected_model = _select_model(requested_model, models, interactive=interactive)
+        result = run_context_quality_test(
+            client,
+            selected_model,
+            test_sizes,
+            runs=runs,
+            progress=_print_context_quality_progress,
+        )
+        _print_progress(result)
+    report = Report(
+        endpoint=base,
+        tested_model=selected_model,
+        created_at=utc_now(),
+        compatibility_guess=detect_provider(base, model_ids=models, error_text=result.raw_error),
+        results=[connectivity, result],
+    )
+    report.errors = collect_errors(report.results)
+    report.recommendations = build_recommendations(report)
+    print_report(report, console)
+    saved_json = save_json_report(report, json_output)
+    console.print(f"[green]JSON guardado:[/] {saved_json}")
+    if markdown:
+        saved_md = save_markdown_report(report, _safe_markdown_output_path(markdown_output))
         console.print(f"[green]Markdown guardado:[/] {saved_md}")
 
 
